@@ -76,7 +76,7 @@ class JsonSchema:
         self, json_object: dict, namespace: Optional[str] = None
     ) -> dict:
         required_field = json_object.get("required", [])
-        title = json_object["title"]
+        title = json_object["title"].title().replace(" ","")
         if namespace is None:
             namespace = self.namespace
         record_namespace = f"{namespace}.{title}"
@@ -85,7 +85,6 @@ class JsonSchema:
         else:
             self._parsed_objects.add(record_namespace)
             result = {
-                "namespace": namespace,
                 "name": title,
                 "type": "record",
                 "fields": [
@@ -102,6 +101,8 @@ class JsonSchema:
             }
             if "description" in json_object:
                 result["doc"] = json_object["description"]
+            if "$schema" in json_object: # only root needs a namespace
+                result["namespace"] = namespace
             return result
 
     def _json_dict_to_avro_map(self, name: str, schema: dict):

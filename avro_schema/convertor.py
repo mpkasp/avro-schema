@@ -11,17 +11,18 @@ class JsonSchema:
         return self._get_avro_type_and_call(self.schema)
 
     def _get_avro_type_and_call(
-        self,
-        schema: dict,
-        name: Optional[str] = None,
-        required: bool = True,
-        namespace: Optional[str] = None,
+            self,
+            schema: dict,
+            name: Optional[str] = None,
+            required: bool = True,
+            namespace: Optional[str] = None,
     ) -> dict:
         type_field = schema.get("type")
         default = schema.get("default")
+        description = schema.get("description")
         if type_field == "object":
             if "properties" in schema:
-                result = self._json_object_to_avro_record(schema, namespace)
+                result = self._json_object_to_avro_record(name, schema, namespace)
             else:
                 result = self._json_dict_to_avro_map(name, schema)
         elif "$ref" in schema:
@@ -50,7 +51,7 @@ class JsonSchema:
                 "date-time": ("long", "timestamp-micros"),
             }
             if fmt == "binary":
-                result = self._json_primitive_type_to_avro_field(name, "bytes", default)
+                result = self._json_primitive_type_to_avro_field(name, "bytes", default, description)
             elif fmt in json_format_to_logical_types:
                 obj_type, log_type = json_format_to_logical_types[fmt]
                 result = self._json_logical_type_to_avro_field(
@@ -58,14 +59,14 @@ class JsonSchema:
                 )
             else:
                 result = self._json_primitive_type_to_avro_field(
-                    name, "string", default
+                    name, "string", default, description
                 )
         elif type_field == "integer":
-            result = self._json_primitive_type_to_avro_field(name, "long", default)
+            result = self._json_primitive_type_to_avro_field(name, "long", default, description)
         elif type_field == "number":
-            result = self._json_primitive_type_to_avro_field(name, "double", default)
+            result = self._json_primitive_type_to_avro_field(name, "double", default, description)
         elif type_field == "boolean":
-            result = self._json_primitive_type_to_avro_field(name, "boolean", default)
+            result = self._json_primitive_type_to_avro_field(name, "boolean", default, description)
         else:
             raise TypeError(f"Unknown type.")
         if default is None and not required:
@@ -73,10 +74,11 @@ class JsonSchema:
         return result
 
     def _json_object_to_avro_record(
-        self, json_object: dict, namespace: Optional[str] = None
+            self, name: Optional[str], json_object: dict, namespace: Optional[str] = None
     ) -> dict:
         required_field = json_object.get("required", [])
-        title = json_object["title"].title().replace(" ","")
+        title = name.title() if name else json_object.get("title").title().replace(" ", "")
+        doc = json_object.get("description", "")
         if namespace is None:
             namespace = self.namespace
         record_namespace = f"{namespace}.{title}"
@@ -84,29 +86,40 @@ class JsonSchema:
             return {"type": "record", "name": record_namespace}
         else:
             self._parsed_objects.add(record_namespace)
-            result = {
-                "name": title,
-                "type": "record",
-                "fields": [
+            result = {"name": title}
+            result_properties = {"name": title, "type": "record"}
+            fields = []
+            if name is None:
+                fields = [
                     self._get_avro_type_and_call(
                         property_data,
                         property_name,
                         property_name in required_field,
                         record_namespace,
                     )
-                    for property_name, property_data in json_object[
-                        "properties"
-                    ].items()
-                ],
-            }
-            if "description" in json_object:
-                result["doc"] = json_object["description"]
-            if "$schema" in json_object: # only root needs a namespace
+                    for property_name, property_data in json_object["properties"].items()
+                ]
+            else:
+                fields = [
+                    self._get_avro_type_and_call(
+                        property_data,
+                        property_name if property_data["type"] != "object" else None,
+                        property_name in required_field,
+                        record_namespace,
+                    )
+                    for property_name, property_data in json_object["properties"].items()
+                ]
+            result_properties["fields"] = fields
+            result["doc"] = doc
+            if "$schema" in json_object:  # only root needs a namespace
                 result["namespace"] = namespace
+                result.update(result_properties)
+            else:
+                result["type"] = result_properties
             return result
 
     def _json_dict_to_avro_map(self, name: str, schema: dict):
-        result = {"name": name} if name is not None else {}
+        result = {"name": name.title()} if name is not None else {}
         result["type"] = {
             "type": "map",
             "values": self._get_avro_type_and_call(schema["additionalProperties"]),
@@ -114,21 +127,27 @@ class JsonSchema:
         return result
 
     def _json_primitive_type_to_avro_field(
-        self, name: Optional[str], object_type: str, default: Optional[Any] = None
+            self,
+            name: Optional[str],
+            object_type: str,
+            default: Optional[Any] = None,
+            description: Optional[str] = None
     ) -> dict:
         result = {"name": name} if name is not None else {}
         if default is None:
             result["type"] = object_type
         else:
             result.update({"type": object_type, "default": default})
+        if description is not None:
+            result.update({"doc": description})
         return result
 
     def _json_logical_type_to_avro_field(
-        self,
-        name: Optional[str],
-        object_type: str,
-        logical_type: str,
-        default: Optional[Any] = None,
+            self,
+            name: Optional[str],
+            object_type: str,
+            logical_type: str,
+            default: Optional[Any] = None,
     ) -> dict:
         result = {"name": name} if name is not None else {}
         result["type"] = {"type": object_type, "logicalType": logical_type}
@@ -140,13 +159,13 @@ class JsonSchema:
         result = {"name": name} if name is not None else {}
         result["type"] = {
             "type": "array",
-            "items": self._get_avro_type_and_call(schema["items"]),
+            "items": self._get_avro_type_and_call(schema["items"]).get('type'),
         }
         return result
 
     def _json_enum_to_avro_enum(self, name: str, schema: dict):
         result = {
-            "name": schema["title"],
+            "name": schema["title"] or name,
             "type": "enum",
             "symbols": schema["enum"],
         }
@@ -157,25 +176,26 @@ class JsonSchema:
     def _json_anyof_to_avro_union(self, name: Optional[str], schema: dict):
         result = {"name": name} if name is not None else {}
         result["type"] = [
-            self._get_avro_type_and_call(item) for item in schema["anyOf"]
+            self._get_avro_type_and_call(item).get('type') for item in schema["anyOf"]
         ]
         return result
 
     def _json_ref_to_avro_record(
-        self, name: str, schema: dict, namespace: Optional[str] = None
+            self, name: str, schema: dict, namespace: Optional[str] = None
     ):
-        selected_schema = self._find(schema["$ref"])
+        specifier, selected_schema = self._find(schema["$ref"])
         if name is not None:
             return {"name": name, "type": self._get_avro_type_and_call(selected_schema)}
         else:
-            return self._get_avro_type_and_call(selected_schema)
+            return self._get_avro_type_and_call(selected_schema, name=specifier)
 
     def _find(self, reference: str):
         ref_list = reference.split("/")
         selector = self.schema
+        specifier = ''
         if ref_list[0] == "#":
             for specifier in ref_list[1:]:
                 selector = selector[specifier]
-            return selector
+            return specifier, selector
         else:
             raise TypeError(f"Wont resolve {ref_list[0]}")
